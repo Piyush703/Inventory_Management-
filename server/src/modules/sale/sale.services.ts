@@ -19,64 +19,83 @@ class SaleServices extends BaseServices<any> {
     const { productPrice, quantity } = payload;
     payload.user = userId;
     payload.totalPrice = productPrice * quantity;
-    const product = await Product.findById(payload.product);
 
-    if (quantity > product!.stock) {
-      throw new CustomError(400, `${quantity} product are not available in stock!`);
+    const product = await Product.findById(payload.product);
+    if (!product) {
+      throw new CustomError(400, 'Product not found');
     }
-    let result: any[];
-    const session = await mongoose.startSession();
+
+    if (quantity > product.stock) {
+      throw new CustomError(400, `${quantity} products are not available in stock!`);
+    }
+
+    let session: mongoose.ClientSession | null = null;
+    if (mongoose.connection.readyState === 1 && mongoose.connection.client.s.options.replicaSet) {
+      session = await mongoose.startSession();
+    }
 
     try {
-      session.startTransaction();
+      if (session) session.startTransaction();
 
-      await Product.findByIdAndUpdate(product?._id, { $inc: { stock: -quantity } }, { session });
-      result = await this.model.create([payload], { session });
-      await session.commitTransaction();
+      // Decrease product stock
+      await Product.findByIdAndUpdate(product._id, { $inc: { stock: -quantity } }, { session });
+      
+      // Create sale
+      const result = await this.model.create([payload], session ? { session } : {});
+      
+      if (!result || result.length === 0) {
+        throw new CustomError(400, 'Failed to create sale');
+      }
 
+      if (session) await session.commitTransaction();
       return result;
-    } catch (error) {
-      await session.abortTransaction();
-      throw new CustomError(400, 'Sale create failed');
+    } catch (error: any) {
+      console.error('Error during sale creation:', error);
+
+      if (session) await session.abortTransaction();
+
+      throw new CustomError(400, `Sale create failed: ${error.message || 'Unknown error'}`);
     } finally {
-      await session.endSession();
+      if (session) await session.endSession();
     }
   }
 
   /**
-   *  Get all sale
+   * Get all sales
    */
   async readAll(query: Record<string, unknown> = {}, userId: string) {
-    // const date = query.date ? query.date : null;
     const search = query.search ? (query.search as string) : '';
 
     const data = await this.model.aggregate([
       {
         $match: {
           user: new Types.ObjectId(userId),
-          $or: [{ productName: { $regex: search, $options: 'i' } }, { buyerName: { $regex: search, $options: 'i' } }]
-        }
+          $or: [
+            { productName: { $regex: search, $options: 'i' } },
+            { buyerName: { $regex: search, $options: 'i' } },
+          ],
+        },
       },
-      ...sortAndPaginatePipeline(query)
+      ...sortAndPaginatePipeline(query),
     ]);
 
     const totalCount = await this.model.aggregate([
       {
         $match: {
-          user: new Types.ObjectId(userId)
-        }
+          user: new Types.ObjectId(userId),
+        },
       },
       {
         $group: {
           _id: null,
-          total: { $sum: 1 }
-        }
+          total: { $sum: 1 },
+        },
       },
       {
         $project: {
-          _id: 0
-        }
-      }
+          _id: 0,
+        },
+      },
     ]);
 
     return { data, totalCount };
@@ -87,24 +106,24 @@ class SaleServices extends BaseServices<any> {
       {
         $match: {
           user: new Types.ObjectId(userId),
-          date: { $exists: true, $ne: null }
-        }
+          date: { $exists: true, $ne: null },
+        },
       },
       {
         $group: {
           _id: {
             week: { $isoWeek: '$date' },
-            year: { $isoWeekYear: '$date' }
+            year: { $isoWeekYear: '$date' },
           },
           totalQuantity: { $sum: '$quantity' },
-          totalRevenue: { $sum: '$totalPrice' }
-        }
+          totalRevenue: { $sum: '$totalPrice' },
+        },
       },
       {
         $sort: {
           '_id.year': 1,
-          '_id.week': 1
-        }
+          '_id.week': 1,
+        },
       },
       {
         $project: {
@@ -112,9 +131,9 @@ class SaleServices extends BaseServices<any> {
           year: '$_id.year',
           totalQuantity: 1,
           totalRevenue: 1,
-          _id: 0
-        }
-      }
+          _id: 0,
+        },
+      },
     ]);
   }
 
@@ -123,31 +142,31 @@ class SaleServices extends BaseServices<any> {
       {
         $match: {
           user: new Types.ObjectId(userId),
-          date: { $exists: true, $ne: null }
-        }
+          date: { $exists: true, $ne: null },
+        },
       },
       {
         $group: {
           _id: {
-            year: { $year: '$date' }
+            year: { $year: '$date' },
           },
           totalQuantity: { $sum: '$quantity' },
-          totalRevenue: { $sum: '$totalPrice' }
-        }
+          totalRevenue: { $sum: '$totalPrice' },
+        },
       },
       {
         $sort: {
-          '_id.year': 1
-        }
+          '_id.year': 1,
+        },
       },
       {
         $project: {
           year: '$_id.year',
           totalQuantity: 1,
           totalRevenue: 1,
-          _id: 0
-        }
-      }
+          _id: 0,
+        },
+      },
     ]);
   }
 
@@ -156,26 +175,26 @@ class SaleServices extends BaseServices<any> {
       {
         $match: {
           user: new Types.ObjectId(userId),
-          date: { $exists: true, $ne: null }
-        }
+          date: { $exists: true, $ne: null },
+        },
       },
       {
         $group: {
           _id: {
             day: { $dayOfMonth: '$date' },
             month: { $month: '$date' },
-            year: { $year: '$date' }
+            year: { $year: '$date' },
           },
           totalQuantity: { $sum: '$quantity' },
-          totalRevenue: { $sum: '$totalPrice' }
-        }
+          totalRevenue: { $sum: '$totalPrice' },
+        },
       },
       {
         $sort: {
           '_id.year': 1,
           '_id.month': 1,
-          '_id.day': 1
-        }
+          '_id.day': 1,
+        },
       },
       {
         $project: {
@@ -184,9 +203,9 @@ class SaleServices extends BaseServices<any> {
           year: '$_id.year',
           totalQuantity: 1,
           totalRevenue: 1,
-          _id: 0
-        }
-      }
+          _id: 0,
+        },
+      },
     ]);
   }
 
@@ -195,24 +214,24 @@ class SaleServices extends BaseServices<any> {
       {
         $match: {
           user: new Types.ObjectId(userId),
-          date: { $exists: true, $ne: null }
-        }
+          date: { $exists: true, $ne: null },
+        },
       },
       {
         $group: {
           _id: {
             month: { $month: '$date' },
-            year: { $year: '$date' }
+            year: { $year: '$date' },
           },
           totalQuantity: { $sum: '$quantity' },
-          totalRevenue: { $sum: '$totalPrice' }
-        }
+          totalRevenue: { $sum: '$totalPrice' },
+        },
       },
       {
         $sort: {
           '_id.year': 1,
-          '_id.month': 1
-        }
+          '_id.month': 1,
+        },
       },
       {
         $project: {
@@ -220,19 +239,18 @@ class SaleServices extends BaseServices<any> {
           year: '$_id.year',
           totalQuantity: 1,
           totalRevenue: 1,
-          _id: 0
-        }
-      }
+          _id: 0,
+        },
+      },
     ]);
   }
 
-  // get single sale
+  // Get single sale
   async read(id: string, userId: string) {
     await this._isExists(id);
-
     return this.model.findOne({ user: new Types.ObjectId(userId), _id: id }).populate({
       path: 'product',
-      select: '-createdAt -updatedAt -__v'
+      select: '-createdAt -updatedAt -__v',
     });
   }
 }

@@ -18,46 +18,62 @@ class ProductServices extends BaseServices<any> {
    * Create new product
    */
   async create(payload: IProduct, userId: string) {
-    type str = keyof IProduct;
-    (Object.keys(payload) as str[]).forEach((key: str) => {
-      if (payload[key] === '') {
+    // Clean up payload by removing empty fields
+    Object.keys(payload).forEach((key) => {
+      if (!payload[key]) {
         delete payload[key];
       }
     });
 
-    payload.user = new Types.ObjectId(userId);
-    const session = await mongoose.startSession();
+    payload.user = new Types.ObjectId(userId); // Set the user ID for the product
+
+    let session: mongoose.ClientSession | null = null;
+    if (mongoose.connection.readyState === 1 && mongoose.connection.client.s.options.replicaSet) {
+      session = await mongoose.startSession();
+    }
 
     try {
-      session.startTransaction();
+      if (session) session.startTransaction();
 
+      // Ensure seller exists
       const seller = await Seller.findById(payload.seller);
-      const product: any = await this.model.create([payload], { session });
+      if (!seller) {
+        throw new CustomError(400, 'Seller not found');
+      }
 
+      // Create the product
+      const product = await this.model.create([payload], session ? { session } : {});
+      if (!product || product.length === 0) {
+        throw new CustomError(400, 'Failed to create product');
+      }
+
+      // Create a purchase record linked to the product
       await Purchase.create(
         [
           {
             user: userId,
-            seller: product[0]?.seller,
-            product: product[0]?._id,
-            sellerName: seller?.name,
-            productName: product[0]?.name,
-            quantity: Number(product[0]?.stock),
-            unitPrice: Number(product[0]?.price),
-            totalPrice: Number(product[0]?.stock) * Number(product[0]?.price)
-          }
+            seller: product[0].seller,
+            product: product[0]._id,
+            sellerName: seller.name,
+            productName: product[0].name,
+            quantity: product[0].stock,
+            unitPrice: product[0].price,
+            totalPrice: product[0].stock * product[0].price,
+          },
         ],
-        { session }
+        session ? { session } : {}
       );
 
-      await session.commitTransaction();
-
+      if (session) await session.commitTransaction();
       return product;
-    } catch (error) {
-      await session.abortTransaction();
-      throw new CustomError(400, 'Product create failed');
+    } catch (error: any) {
+      console.error('Error during product creation:', error);
+
+      if (session) await session.abortTransaction();
+
+      throw new CustomError(400, `Product create failed: ${error.message || 'Unknown error'}`);
     } finally {
-      await session.endSession();
+      if (session) await session.endSession();
     }
   }
 
@@ -68,21 +84,21 @@ class ProductServices extends BaseServices<any> {
     return this.model.aggregate([
       {
         $match: {
-          user: new Types.ObjectId(userId)
-        }
+          user: new Types.ObjectId(userId),
+        },
       },
       {
         $group: {
           _id: null,
-          totalQuantity: { $sum: '$stock' }
-        }
+          totalQuantity: { $sum: '$stock' },
+        },
       },
       {
         $project: {
           totalQuantity: 1,
-          _id: 0
-        }
-      }
+          _id: 0,
+        },
+      },
     ]);
   }
 
@@ -97,14 +113,14 @@ class ProductServices extends BaseServices<any> {
       {
         $group: {
           _id: null,
-          total: { $sum: 1 }
-        }
+          total: { $sum: 1 },
+        },
       },
       {
         $project: {
-          _id: 0
-        }
-      }
+          _id: 0,
+        },
+      },
     ]);
 
     data = await this.model.populate(data, { path: 'category', select: '-__v -user' });
@@ -153,8 +169,8 @@ class ProductServices extends BaseServices<any> {
             productName: product.name,
             quantity: Number(product.stock),
             unitPrice: Number(product.price),
-            totalPrice: Number(product.stock) * Number(product.price)
-          }
+            totalPrice: Number(product.stock) * Number(product.price),
+          },
         ],
         { session }
       );
@@ -163,7 +179,7 @@ class ProductServices extends BaseServices<any> {
 
       return product;
     } catch (error) {
-      console.log(error);
+      console.error('Error during stock addition:', error);
       await session.abortTransaction();
       throw new CustomError(400, 'Product create failed');
     } finally {
